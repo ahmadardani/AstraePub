@@ -142,7 +142,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   /// Returns a chapter's HTML with embedded EPUB images converted to inline
   /// base64 data URIs, so it renders correctly whether it's loaded into the
   /// in-app WebView or served to an external browser.
-  String _getChapterHtmlWithImages(int chapterIndex) {
+String _getChapterHtmlWithImages(int chapterIndex) {
     String rawHtml = EpubService.getChapterHtml(_currentBook!, chapterIndex);
 
     if (_currentBook!.Content?.Images != null) {
@@ -154,10 +154,21 @@ class _ReaderScreenState extends State<ReaderScreen> {
           if (key.toLowerCase().endsWith('.gif')) mimeType = 'image/gif';
 
           String dataUri = 'data:$mimeType;base64,$base64Image';
-
-          rawHtml = rawHtml.replaceAll(key, dataUri);
           String fileName = key.split('/').last;
-          rawHtml = rawHtml.replaceAll(fileName, dataUri);
+          String escapedName = RegExp.escape(fileName);
+
+          rawHtml = rawHtml.replaceAll(
+            RegExp('src="[^"]*$escapedName"'),
+            'src="$dataUri"',
+          );
+          rawHtml = rawHtml.replaceAll(
+            RegExp("src='[^']*$escapedName'"),
+            "src='$dataUri'",
+          );
+          rawHtml = rawHtml.replaceAll(
+            RegExp('href="[^"]*$escapedName"'),
+            'href="$dataUri"',
+          );
         }
       });
     }
