@@ -1,9 +1,11 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:epubx/epubx.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:google_mlkit_translation/google_mlkit_translation.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'epub_service.dart';
 
 void main() {
@@ -46,9 +48,38 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   late final WebViewController _webViewController;
 
+  HttpServer? _previewServer;
+
   bool _isTranslating = false;
   TranslateLanguage _sourceLanguage = TranslateLanguage.english;
   TranslateLanguage _targetLanguage = TranslateLanguage.indonesian;
+  final ValueNotifier<String> _translationStatus = ValueNotifier<String>('');
+
+  static const Map<String, TranslateLanguage> _languageOptions = {
+    'English': TranslateLanguage.english,
+    'Indonesian': TranslateLanguage.indonesian,
+    'Spanish': TranslateLanguage.spanish,
+    'French': TranslateLanguage.french,
+    'German': TranslateLanguage.german,
+    'Japanese': TranslateLanguage.japanese,
+    'Korean': TranslateLanguage.korean,
+    'Chinese': TranslateLanguage.chinese,
+    'Arabic': TranslateLanguage.arabic,
+    'Russian': TranslateLanguage.russian,
+    'Portuguese': TranslateLanguage.portuguese,
+    'Italian': TranslateLanguage.italian,
+    'Hindi': TranslateLanguage.hindi,
+    'Vietnamese': TranslateLanguage.vietnamese,
+    'Thai': TranslateLanguage.thai,
+  };
+
+  /// Human-readable name for a [TranslateLanguage], used in status messages.
+  String _languageLabel(TranslateLanguage language) {
+    return _languageOptions.entries
+        .firstWhere((e) => e.value == language,
+            orElse: () => MapEntry(language.name, language))
+        .key;
+  }
 
   @override
   void initState() {
@@ -56,6 +87,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _webViewController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       ..setBackgroundColor(const Color(0xFFFAFAFA));
+  }
+
+  @override
+  void dispose() {
+    _translationStatus.dispose();
+    _previewServer?.close(force: true);
+    super.dispose();
   }
 
   Future<void> _pickAndLoadEpub() async {
@@ -94,9 +132,19 @@ class _ReaderScreenState extends State<ReaderScreen> {
   void _loadChapterToWebView(int chapterIndex) {
     if (_currentBook == null) return;
 
+    final rawHtml = _getChapterHtmlWithImages(chapterIndex);
+    final wrappedHtml =
+        _wrapHtml(bodyContent: '<div id="content-body">$rawHtml</div>');
+
+    _webViewController.loadHtmlString(wrappedHtml);
+  }
+
+  /// Returns a chapter's HTML with embedded EPUB images converted to inline
+  /// base64 data URIs, so it renders correctly whether it's loaded into the
+  /// in-app WebView or served to an external browser.
+  String _getChapterHtmlWithImages(int chapterIndex) {
     String rawHtml = EpubService.getChapterHtml(_currentBook!, chapterIndex);
 
-    // Fix rendering of images embedded in the EPUB
     if (_currentBook!.Content?.Images != null) {
       _currentBook!.Content!.Images!.forEach((key, epubImageFile) {
         if (epubImageFile.Content != null) {
@@ -104,7 +152,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
           String mimeType = 'image/jpeg';
           if (key.toLowerCase().endsWith('.png')) mimeType = 'image/png';
           if (key.toLowerCase().endsWith('.gif')) mimeType = 'image/gif';
-          
+
           String dataUri = 'data:$mimeType;base64,$base64Image';
 
           rawHtml = rawHtml.replaceAll(key, dataUri);
@@ -114,49 +162,52 @@ class _ReaderScreenState extends State<ReaderScreen> {
       });
     }
 
-    // HTML wrapped with horizontal-reading CSS
-    String wrappedHtml = '''
+    return rawHtml;
+  }
+
+  // Shared horizontal-reading CSS used by both the in-app WebView and the
+  // pages served to the external browser preview.
+  static const String _readingCss = '''
+    * {
+      writing-mode: horizontal-tb !important;
+      -webkit-writing-mode: horizontal-tb !important;
+      text-orientation: mixed !important;
+      direction: ltr !important;
+      line-height: 1.8 !important;
+    }
+    html, body {
+      margin: 0 !important;
+      padding: 15px !important;
+      background-color: #FAFAFA;
+      color: #333333;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      overflow-x: hidden;
+    }
+    img {
+      max-width: 100% !important;
+      height: auto !important;
+      display: block;
+      margin: 15px auto !important;
+    }
+  ''';
+
+  /// Wraps arbitrary body content with the shared reading CSS.
+  String _wrapHtml({required String bodyContent}) {
+    return '''
     <!DOCTYPE html>
     <html lang="en">
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
       <style>
-        * {
-          writing-mode: horizontal-tb !important;
-          -webkit-writing-mode: horizontal-tb !important;
-          text-orientation: mixed !important;
-          direction: ltr !important; 
-          line-height: 1.8 !important;
-        }
-        html, body {
-          margin: 0 !important;
-          padding: 15px !important;
-          background-color: #FAFAFA;
-          color: #333333;
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-          overflow-x: hidden;
-        }
-        img {
-          max-width: 100% !important;
-          height: auto !important;
-          display: block;
-          margin: 15px auto !important;
-        }
+        $_readingCss
       </style>
     </head>
     <body>
-      
-      <!-- Original book content -->
-      <div id="content-body">
-        $rawHtml
-      </div>
-
+      $bodyContent
     </body>
     </html>
     ''';
-
-    _webViewController.loadHtmlString(wrappedHtml);
   }
 
   /// Strips HTML tags and decodes the handful of entities that show up in
@@ -189,6 +240,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _isTranslating = true;
     });
 
+    _translationStatus.value = 'Preparing…';
+    _showTranslatingDialog();
+
     final rawHtml =
         EpubService.getChapterHtml(_currentBook!, _currentChapterIndex);
     final plainText = _extractPlainText(rawHtml);
@@ -200,17 +254,34 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
 
     try {
-      // Download the language models if they aren't already on the device.
-      await modelManager.downloadModel(_sourceLanguage.bcpCode);
-      await modelManager.downloadModel(_targetLanguage.bcpCode);
+      // Only download a language pack if it isn't already on the device —
+      // this is what makes every translation after the first one instant.
+      final needsSource =
+          !await modelManager.isModelDownloaded(_sourceLanguage.bcpCode);
+      if (needsSource) {
+        _translationStatus.value =
+            'Downloading ${_languageLabel(_sourceLanguage)} language pack…';
+        await modelManager.downloadModel(_sourceLanguage.bcpCode);
+      }
 
+      final needsTarget =
+          !await modelManager.isModelDownloaded(_targetLanguage.bcpCode);
+      if (needsTarget) {
+        _translationStatus.value =
+            'Downloading ${_languageLabel(_targetLanguage)} language pack…';
+        await modelManager.downloadModel(_targetLanguage.bcpCode);
+      }
+
+      _translationStatus.value = 'Translating chapter…';
       final translated = await translator.translateText(plainText);
 
       if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop(); // close loading dialog
       _showTranslatedText(translated);
     } catch (e) {
       debugPrint('Translation failed: $e');
       if (mounted) {
+        Navigator.of(context, rootNavigator: true).pop(); // close loading dialog
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Translation failed. Please check your connection and try again.'),
@@ -223,27 +294,43 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
   }
 
+  /// Blocking dialog shown while the language pack downloads and/or the
+  /// chapter is being translated, with a live-updating status line so it's
+  /// clear the app is working and not just stuck buffering.
+  void _showTranslatingDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return PopScope(
+          canPop: false,
+          child: AlertDialog(
+            content: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: ValueListenableBuilder<String>(
+                    valueListenable: _translationStatus,
+                    builder: (context, value, _) => Text(value),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   /// Shows a small dialog letting the user choose the source and target
   /// language for translation.
   Future<(TranslateLanguage, TranslateLanguage)?> _pickLanguages() async {
-    const languageOptions = <String, TranslateLanguage>{
-      'English': TranslateLanguage.english,
-      'Indonesian': TranslateLanguage.indonesian,
-      'Spanish': TranslateLanguage.spanish,
-      'French': TranslateLanguage.french,
-      'German': TranslateLanguage.german,
-      'Japanese': TranslateLanguage.japanese,
-      'Korean': TranslateLanguage.korean,
-      'Chinese': TranslateLanguage.chinese,
-      'Arabic': TranslateLanguage.arabic,
-      'Russian': TranslateLanguage.russian,
-      'Portuguese': TranslateLanguage.portuguese,
-      'Italian': TranslateLanguage.italian,
-      'Hindi': TranslateLanguage.hindi,
-      'Vietnamese': TranslateLanguage.vietnamese,
-      'Thai': TranslateLanguage.thai,
-    };
-
     TranslateLanguage source = _sourceLanguage;
     TranslateLanguage target = _targetLanguage;
 
@@ -260,7 +347,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   DropdownButtonFormField<TranslateLanguage>(
                     value: source,
                     decoration: const InputDecoration(labelText: 'From'),
-                    items: languageOptions.entries
+                    items: _languageOptions.entries
                         .map((e) => DropdownMenuItem(
                               value: e.value,
                               child: Text(e.key),
@@ -274,7 +361,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   DropdownButtonFormField<TranslateLanguage>(
                     value: target,
                     decoration: const InputDecoration(labelText: 'To'),
-                    items: languageOptions.entries
+                    items: _languageOptions.entries
                         .map((e) => DropdownMenuItem(
                               value: e.value,
                               child: Text(e.key),
@@ -344,6 +431,134 @@ class _ReaderScreenState extends State<ReaderScreen> {
         );
       },
     );
+  }
+
+  /// Starts (or reuses) a local HTTP server bound to 127.0.0.1 only, then
+  /// opens the current chapter in the device's external browser. Pages are
+  /// fully navigable in the browser via real links — no need to come back
+  /// to the app to change chapters.
+  Future<void> _openBrowserPreview() async {
+    if (_currentBook == null) return;
+
+    try {
+      if (_previewServer == null) {
+        final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+        server.listen(_handlePreviewRequest);
+        _previewServer = server;
+      }
+
+      final port = _previewServer!.port;
+      final uri =
+          Uri.parse('http://127.0.0.1:$port/chapter/$_currentChapterIndex');
+      final launched =
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+
+      if (!launched && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not open the browser.')),
+        );
+      }
+    } catch (e) {
+      debugPrint('Failed to start browser preview: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to start browser preview.')),
+        );
+      }
+    }
+  }
+
+  /// Routes incoming requests from the local preview server: "/" shows the
+  /// chapter index, "/chapter/<n>" shows a specific chapter.
+  void _handlePreviewRequest(HttpRequest request) async {
+    final path = request.uri.path;
+    String html;
+
+    if (path == '/') {
+      html = _buildIndexHtml();
+    } else if (path.startsWith('/chapter/')) {
+      final index = int.tryParse(path.substring('/chapter/'.length));
+      final chapters = _currentBook?.Chapters;
+      final isValid = index != null &&
+          chapters != null &&
+          index >= 0 &&
+          index < chapters.length;
+
+      if (isValid) {
+        html = _buildChapterHtmlForServer(index);
+      } else {
+        request.response.statusCode = HttpStatus.notFound;
+        html = _wrapHtml(bodyContent: '<p>Chapter not found.</p>');
+      }
+    } else {
+      request.response.statusCode = HttpStatus.notFound;
+      html = _wrapHtml(bodyContent: '<p>Not found.</p>');
+    }
+
+    request.response.headers.contentType = ContentType.html;
+    request.response.write(html);
+    await request.response.close();
+  }
+
+  /// Builds the chapter list landing page ("/") for the browser preview.
+  String _buildIndexHtml() {
+    final chapters = _currentBook?.Chapters ?? [];
+    final bookTitle = _currentBook?.Title ?? 'Book';
+
+    final items = StringBuffer();
+    for (var i = 0; i < chapters.length; i++) {
+      final chapterTitle = chapters[i].Title?.trim().isNotEmpty == true
+          ? chapters[i].Title!
+          : 'Chapter ${i + 1}';
+      items.writeln(
+        '<li><a href="/chapter/$i" '
+        'style="display:block;padding:12px 0;text-decoration:none;'
+        'color:#333;border-bottom:1px solid #eee;">$chapterTitle</a></li>',
+      );
+    }
+
+    final body = '''
+      <h2 style="margin-top:0;">$bookTitle</h2>
+      <ul style="list-style:none;padding:0;margin:0;">
+        $items
+      </ul>
+    ''';
+
+    return _wrapHtml(bodyContent: body);
+  }
+
+  /// Builds a single chapter page for the browser preview, with real
+  /// Prev/Next/Chapters links so the browser can navigate on its own.
+  String _buildChapterHtmlForServer(int index) {
+    final chapters = _currentBook!.Chapters!;
+    final total = chapters.length;
+    final rawHtml = _getChapterHtmlWithImages(index);
+
+    final prevLink = index > 0
+        ? '<a href="/chapter/${index - 1}" style="text-decoration:none;color:#333;">&larr; Prev</a>'
+        : '<span style="color:#ccc;">&larr; Prev</span>';
+    final nextLink = index < total - 1
+        ? '<a href="/chapter/${index + 1}" style="text-decoration:none;color:#333;">Next &rarr;</a>'
+        : '<span style="color:#ccc;">Next &rarr;</span>';
+
+    final body = '''
+      <div style="display:flex;justify-content:space-between;align-items:center;
+                  padding-bottom:10px;border-bottom:1px solid #eee;
+                  margin-bottom:15px;font-size:13px;">
+        <a href="/" style="text-decoration:none;color:#333;">&#9776; Chapters</a>
+        <span style="color:#999;">Chapter ${index + 1} of $total</span>
+      </div>
+      <div id="content-body">
+        $rawHtml
+      </div>
+      <div style="display:flex;justify-content:space-between;padding-top:20px;
+                  margin-top:20px;border-top:1px solid #eee;">
+        $prevLink
+        $nextLink
+      </div>
+    ''';
+
+    return _wrapHtml(bodyContent: body);
   }
 
   /// Jumps directly to a given chapter index
@@ -448,16 +663,17 @@ class _ReaderScreenState extends State<ReaderScreen> {
               tooltip: 'Chapter List',
               onPressed: _showChapterList,
             ),
+          // Browser preview button
+          if (_currentBook != null)
+            IconButton(
+              icon: const Icon(Icons.open_in_browser, color: Colors.black87),
+              tooltip: 'Preview in Browser',
+              onPressed: _openBrowserPreview,
+            ),
           // Translate button
           if (_currentBook != null)
             IconButton(
-              icon: _isTranslating
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.g_translate, color: Colors.blueAccent),
+              icon: const Icon(Icons.g_translate, color: Colors.blueAccent),
               tooltip: 'Translate Chapter',
               onPressed: _isTranslating ? null : _translateCurrentPage,
             ),
